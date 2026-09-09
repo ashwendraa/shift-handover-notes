@@ -505,25 +505,32 @@ def main():
             note_html = parse_claude_summary(raw_summary)
 
             if args.dry_run:
+                # Dry runs must never mark a conversation as handled. Only an
+                # actual successful post advances the state file, otherwise a
+                # dry run would cause the next live run to skip conversations
+                # it never actually posted to.
                 print(f"\n--- [{conv_id}] DRY RUN, would post: ---")
                 print(note_html)
                 log_result(log_file, [datetime.now(timezone.utc).isoformat(), conv_id, state_name, "dry_run", "would_post", raw_summary[:300]])
-            else:
-                try:
-                    intercom.post_note(conv_id, admin_id, note_html)
-                    print(f"  [{conv_id}] Note posted.")
-                    log_result(log_file, [datetime.now(timezone.utc).isoformat(), conv_id, state_name, "posted", "note_posted", raw_summary[:300]])
-                    total_posted += 1
-                except Exception as e:
-                    print(f"  [{conv_id}] ERROR posting note: {e}")
-                    log_result(log_file, [datetime.now(timezone.utc).isoformat(), conv_id, state_name, "error", "post_failed", str(e)])
-                    total_errors += 1
-                    continue
+                time.sleep(SLEEP_BETWEEN_CONVERSATIONS)
+                continue
+
+            try:
+                intercom.post_note(conv_id, admin_id, note_html)
+                print(f"  [{conv_id}] Note posted.")
+                log_result(log_file, [datetime.now(timezone.utc).isoformat(), conv_id, state_name, "posted", "note_posted", raw_summary[:300]])
+                total_posted += 1
+            except Exception as e:
+                print(f"  [{conv_id}] ERROR posting note: {e}")
+                log_result(log_file, [datetime.now(timezone.utc).isoformat(), conv_id, state_name, "error", "post_failed", str(e)])
+                total_errors += 1
+                continue
 
             state[conv_id] = {"last_updated_at": updated_at}
             time.sleep(SLEEP_BETWEEN_CONVERSATIONS)
 
-    save_state(state_file, state)
+    if not args.dry_run:
+        save_state(state_file, state)
 
     print("\n=== Summary ===")
     print(f"Conversations seen:            {total_seen}")
