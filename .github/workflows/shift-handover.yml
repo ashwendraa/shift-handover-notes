@@ -1,0 +1,79 @@
+name: Shift Handover Bot
+
+on:
+  # Manual trigger, for your dry runs and limited-ID tests
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (do not actually post notes)"
+        type: boolean
+        default: true
+      limit_ids:
+        description: "Comma separated conversation IDs to restrict to (leave blank for all)"
+        type: string
+        default: ""
+
+  # Scheduled runs. GitHub Actions cron is UTC, adjust these if your
+  # times above were meant in a different timezone.
+  schedule:
+    # Mon-Fri 3 PM and 6 PM
+    - cron: "0 15 * * 1-5"
+    - cron: "0 18 * * 1-5"
+    # Mon and Tue 11:59 PM
+    - cron: "59 23 * * 1-2"
+    # Tue-Sat 4 AM and 6 AM
+    - cron: "0 4 * * 2-6"
+    - cron: "0 6 * * 2-6"
+
+jobs:
+  run-handover:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Restore state file cache
+        uses: actions/cache@v4
+        with:
+          path: shift_handover_state.json
+          # A key that never changes on its own means the cache is
+          # restored every run and saved again every run, giving you
+          # a persistent state file across scheduled runs.
+          key: shift-handover-state
+
+      - name: Run shift handover script (scheduled, live)
+        if: github.event_name == 'schedule'
+        env:
+          INTERCOM_ACCESS_TOKEN: ${{ secrets.INTERCOM_ACCESS_TOKEN }}
+          INTERCOM_ADMIN_ID: ${{ secrets.INTERCOM_ADMIN_ID }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python3 shift_handover.py
+
+      - name: Run shift handover script (manual trigger)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          INTERCOM_ACCESS_TOKEN: ${{ secrets.INTERCOM_ACCESS_TOKEN }}
+          INTERCOM_ADMIN_ID: ${{ secrets.INTERCOM_ADMIN_ID }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          ARGS=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          if [ -n "${{ inputs.limit_ids }}" ]; then
+            ARGS="$ARGS --limit-ids ${{ inputs.limit_ids }}"
+          fi
+          python3 shift_handover.py $ARGS
+
+      - name: Upload run log as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shift-handover-log-${{ github.run_id }}
+          path: shift_handover_log.csv
+          if-no-files-found: ignore
