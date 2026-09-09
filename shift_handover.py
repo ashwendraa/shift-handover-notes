@@ -52,7 +52,7 @@ import re
 import html
 import urllib.request
 import urllib.error
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 INTERCOM_API_BASE = "https://api.intercom.io"
 ANTHROPIC_API_BASE = "https://api.anthropic.com/v1/messages"
@@ -61,6 +61,13 @@ ANTHROPIC_VERSION = "2023-06-01"
 DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 STATE_FILE_DEFAULT = "shift_handover_state.json"
 LOG_FILE_DEFAULT = "shift_handover_log.csv"
+
+# Admin email addresses that are not real human agents (shared/system
+# inboxes etc). Conversations currently owned by one of these are
+# skipped, same as conversations never escalated to a human at all.
+EXCLUDED_ADMIN_EMAILS = {"product@loopwork.co"}
+
+IST_OFFSET = timedelta(hours=5, minutes=30)
 
 REQUEST_TIMEOUT = 30
 MAX_RETRIES = 3
@@ -153,6 +160,26 @@ class IntercomClient:
             headers=self.headers,
         )
 
+    def get_admin_email(self, admin_id, cache):
+        """Resolves an Intercom admin ID to their email, with an in-memory
+        cache so the same admin is only looked up once per run."""
+        if admin_id is None:
+            return None
+        admin_id = str(admin_id)
+        if admin_id in cache:
+            return cache[admin_id]
+        try:
+            result = http_request(
+                "GET",
+                f"{INTERCOM_API_BASE}/admins/{admin_id}",
+                headers=self.headers,
+            )
+            email = (result.get("email") or "").lower()
+        except Exception:
+            email = ""
+        cache[admin_id] = email
+        return email
+
     def post_note(self, conversation_id, admin_id, html_body):
         body = {
             "message_type": "note",
@@ -187,14 +214,19 @@ class AnthropicClient:
             "support team. A busy agent starting their shift reads hundreds "
             "of these in a row, so every extra word costs them time. Produce "
             "a summary strictly in this format, and nothing else:\n\n"
-            "HANDOVER: <ONE short line, under 12 words if possible. Just "
-            "who owns it now and the current state in the fewest words "
-            "possible. If the conversation moved between two or more human "
-            "agents, show that as 'Name1 to Name2' or similar, only if it "
-            "actually happened. Do NOT narrate how it got there (no 'Loop "
-            "AI could not resolve X and handed off to Y', no explaining "
-            "what the bot tried, no quoting what the agent said). State "
-            "the current fact only, not the backstory.>\n\n"
+            "OWNER: <just the current owner's name, nothing else, no "
+            "sentence, no punctuation beyond the name itself. This is "
+            "who the next shift follows up with.>\n\n"
+            "HANDOVER: <ONE short line, under 12 words if possible. Do "
+            "NOT repeat the owner's name here, that is already shown "
+            "separately. Just the current state of play in the fewest "
+            "words possible. If the conversation moved between two or "
+            "more human agents, show that as 'Name1 to Name2' or "
+            "similar, only if it actually happened. Do NOT narrate how "
+            "it got there (no 'Loop AI could not resolve X and handed "
+            "off to Y', no explaining what the bot tried, no quoting "
+            "what the agent said). State the current fact only, not "
+            "the backstory.>\n\n"
             "QUESTIONS:\n"
             "- <question 1 the customer asked, paraphrased, as short as "
             "possible, ideally under 10 words>\n"
@@ -356,16 +388,20 @@ def parse_claude_summary(raw_text):
     """Parses the structured text Claude returns into an HTML note body.
     Falls back to dumping the raw text if parsing fails, rather than
     silently posting nothing."""
+    owner = ""
     handover = ""
     questions = []
     status = ""
     reason = ""
 
+    owner_match = re.search(r"OWNER:\s*(.+?)(?=\n\s*HANDOVER:|\Z)", raw_text, re.S)
     handover_match = re.search(r"HANDOVER:\s*(.+?)(?=\n\s*QUESTIONS:|\Z)", raw_text, re.S)
     questions_match = re.search(r"QUESTIONS:\s*(.+?)(?=\n\s*STATUS:|\Z)", raw_text, re.S)
     status_match = re.search(r"STATUS:\s*(.+?)(?=\n\s*REASON:|\Z)", raw_text, re.S)
     reason_match = re.search(r"REASON:\s*(.+)", raw_text, re.S)
 
+    if owner_match:
+        owner = owner_match.group(1).strip().splitlines()[0].strip()
     if handover_match:
         handover = handover_match.group(1).strip()
     if questions_match:
@@ -378,7 +414,7 @@ def parse_claude_summary(raw_text):
     if reason_match:
         reason = reason_match.group(1).strip().splitlines()[0].strip()
 
-    if not handover and not questions and not status:
+    if not owner and not handover and not questions and not status:
         # Parsing failed, fall back to raw text so nothing is silently lost
         safe = html.escape(raw_text)
         return f"<p><b>Shift handover summary</b></p><p>{safe}</p>"
@@ -386,17 +422,19 @@ def parse_claude_summary(raw_text):
     status_color = "#2e7d32" if status.lower().startswith("solved") else "#b26a00"
     questions_html = "".join(f"<li>{html.escape(q)}</li>" for q in questions) or "<li>None captured</li>"
 
-    # Deliberately compact: one line handover, tight question list, one line
-    # status. No section banner, no restated customer name/company (already
-    # visible in the conversation header), no timestamp clutter beyond a
-    # small footer.
+    ist_now = datetime.now(timezone.utc) + IST_OFFSET
+
+    # Deliberately compact: owner on its own line so it is never ambiguous
+    # who the next shift follows up with, one line handover, tight question
+    # list, one line status, IST timestamp footer.
     body = (
+        f"<p><b>Owner:</b> {html.escape(owner) if owner else 'Unassigned'}</p>"
         f"<p><b>Handover:</b> {html.escape(handover)}</p>"
         f"<ul style=\"margin:2px 0;padding-left:18px\">{questions_html}</ul>"
         f"<p><b>Status:</b> <span style=\"color:{status_color}\"><b>{html.escape(status)}</b></span>"
         f"{' - ' + html.escape(reason) if reason else ''}</p>"
         f"<p style=\"color:#aaa;font-size:10px;margin-top:2px\">"
-        f"{datetime.now(timezone.utc).strftime('%b %d %H:%M UTC')}</p>"
+        f"{ist_now.strftime('%b %d %H:%M IST')}</p>"
     )
     return body
 
@@ -462,6 +500,7 @@ def main():
     claude = AnthropicClient(anthropic_key, model)
 
     state = load_state(state_file)
+    admin_email_cache = {}
 
     limit_ids = set(x.strip() for x in args.limit_ids.split(",") if x.strip())
     states_to_process = ["open", "snoozed"] if args.state == "both" else [args.state]
@@ -469,6 +508,7 @@ def main():
     total_seen = 0
     total_posted = 0
     total_skipped_unchanged = 0
+    total_skipped_not_human = 0
     total_errors = 0
 
     for state_name in states_to_process:
@@ -485,6 +525,18 @@ def main():
                 print(f"  [{conv_id}] ERROR fetching conversation: {e}")
                 log_result(log_file, [datetime.now(timezone.utc).isoformat(), conv_id, state_name, "error", "fetch_failed", str(e)])
                 total_errors += 1
+                continue
+
+            # Skip conversations never escalated to a human (still purely
+            # with the bot, no admin assigned), and skip conversations
+            # currently owned by a non-human/system inbox account.
+            current_admin_id = conversation.get("admin_assignee_id")
+            if current_admin_id is None:
+                total_skipped_not_human += 1
+                continue
+            owner_email = intercom.get_admin_email(current_admin_id, admin_email_cache)
+            if owner_email in EXCLUDED_ADMIN_EMAILS:
+                total_skipped_not_human += 1
                 continue
 
             updated_at = conversation.get("updated_at")
@@ -536,6 +588,7 @@ def main():
     print(f"Conversations seen:            {total_seen}")
     print(f"Notes posted:                  {total_posted}")
     print(f"Skipped (unchanged since last run): {total_skipped_unchanged}")
+    print(f"Skipped (not assigned to a human): {total_skipped_not_human}")
     print(f"Errors:                        {total_errors}")
     if args.dry_run:
         print("This was a DRY RUN. No notes were actually posted.")
