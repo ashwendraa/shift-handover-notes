@@ -4,7 +4,10 @@ Loop Support Shift Handover Bot
 =================================
 
 What this does, every time it runs:
-1. Pulls every Intercom conversation currently in "open" or "snoozed" state.
+1. Pulls every Intercom conversation currently in "open" state. Snoozed
+   conversations are skipped by default: posting a note as this script's
+   admin account auto-unsnoozes a conversation in Intercom, which is a
+   side effect we do not want, so we simply leave snoozed tickets alone.
 2. Skips any conversation that already has a note and has not received
    at least 2 new customer messages since that note (so an automated
    bounce/auto-reply loop, or a conversation with only agent activity,
@@ -507,7 +510,7 @@ def main():
     parser = argparse.ArgumentParser(description="Loop Support Shift Handover Bot")
     parser.add_argument("--dry-run", action="store_true", help="Do not actually post notes")
     parser.add_argument("--limit-ids", type=str, default="", help="Comma separated conversation IDs to restrict to")
-    parser.add_argument("--state", type=str, default="both", choices=["open", "snoozed", "both"])
+    parser.add_argument("--state", type=str, default="open", choices=["open", "snoozed", "both"], help="Which conversations to process. Default is open only, since posting a note auto-unsnoozes a conversation in Intercom and we do not want that side effect.")
     parser.add_argument("--force", action="store_true", help="Ignore state file, post even if unchanged")
     args = parser.parse_args()
 
