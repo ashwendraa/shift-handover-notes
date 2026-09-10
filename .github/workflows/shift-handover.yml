@@ -12,18 +12,27 @@ on:
         description: "Comma separated conversation IDs to restrict to (leave blank for all)"
         type: string
         default: ""
+      force:
+        description: "Force post even if unchanged since last recorded run (use this to recover from a bad state file, or to re-test)"
+        type: boolean
+        default: false
 
-  # Scheduled runs. GitHub Actions cron is UTC, adjust these if your
-  # times above were meant in a different timezone.
+  # Scheduled runs. GitHub Actions cron always runs in UTC. Target
+  # shift-start times are IST (UTC+5:30): Mon-Fri 5 AM, 2 PM, 6 PM,
+  # 8 PM, and Sat 5 AM. Each run is set to fire 15 minutes BEFORE the
+  # actual shift time, so the incoming shift already has a fresh note
+  # waiting when they log in.
   schedule:
-    # Mon-Fri 3 PM and 6 PM
-    - cron: "0 15 * * 1-5"
-    - cron: "0 18 * * 1-5"
-    # Mon and Tue 11:59 PM
-    - cron: "59 23 * * 1-2"
-    # Tue-Sat 4 AM and 6 AM
-    - cron: "0 4 * * 2-6"
-    - cron: "0 6 * * 2-6"
+    # Mon-Fri 4:45 AM IST (15 min before 5 AM) -> Sun 11:15 PM through Thu 11:15 PM UTC
+    - cron: "15 23 * * 0-4"
+    # Mon-Fri 1:45 PM IST (15 min before 2 PM) -> Mon-Fri 8:15 AM UTC
+    - cron: "15 8 * * 1-5"
+    # Mon-Fri 5:45 PM IST (15 min before 6 PM) -> Mon-Fri 12:15 PM UTC
+    - cron: "15 12 * * 1-5"
+    # Mon-Fri 7:45 PM IST (15 min before 8 PM) -> Mon-Fri 2:15 PM UTC
+    - cron: "15 14 * * 1-5"
+    # Sat 4:45 AM IST (15 min before 5 AM) -> Fri 11:15 PM UTC
+    - cron: "15 23 * * 5"
 
 jobs:
   run-handover:
@@ -64,6 +73,9 @@ jobs:
           ARGS=""
           if [ "${{ inputs.dry_run }}" = "true" ]; then
             ARGS="$ARGS --dry-run"
+          fi
+          if [ "${{ inputs.force }}" = "true" ]; then
+            ARGS="$ARGS --force"
           fi
           if [ -n "${{ inputs.limit_ids }}" ]; then
             ARGS="$ARGS --limit-ids ${{ inputs.limit_ids }}"
