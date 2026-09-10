@@ -5,9 +5,10 @@ Loop Support Shift Handover Bot
 
 What this does, every time it runs:
 1. Pulls every Intercom conversation currently in "open" or "snoozed" state.
-2. Skips any conversation that has not changed since the last time this
-   script posted a note on it (so idle tickets do not get spammed with
-   repeat notes on every run).
+2. Skips any conversation that already has a note and has not received
+   at least 2 new customer messages since that note (so an automated
+   bounce/auto-reply loop, or a conversation with only agent activity,
+   does not get a near-duplicate note every run).
 3. Builds a clean transcript of each conversation (assignment history,
    who has replied, what the customer has said).
 4. Calls the Claude API to generate a shift handover summary in this
@@ -67,6 +68,13 @@ LOG_FILE_DEFAULT = "shift_handover_log.csv"
 # skipped, same as conversations never escalated to a human at all.
 EXCLUDED_ADMIN_EMAILS = {"product@loopwork.co"}
 
+# A conversation that already has a note only gets a new one once at
+# least this many NEW customer messages have arrived since the last
+# note. This is what stops automated bounce/auto-reply loops and
+# quiet agent-only activity from generating near-duplicate notes.
+MIN_NEW_CUSTOMER_MESSAGES_FOR_UPDATE = 2
+
+DISCLAIMER_TEXT = "Note: This summary is for reference only, cross check all details if needed to avoid escalation."
 IST_OFFSET = timedelta(hours=5, minutes=30)
 
 REQUEST_TIMEOUT = 30
@@ -311,27 +319,42 @@ def trim_quoted_reply(text):
     return text[:earliest_cut].strip()
 
 
-def build_conversation_view(conversation):
-    """Returns (transcript_text, meta_dict)."""
+def build_conversation_view(conversation, bot_admin_id=None):
+    """Returns (transcript_text, meta_dict).
+
+    bot_admin_id, when given, is this script's own posting admin ID.
+    Notes authored by that account (our own previously posted shift
+    handover notes) are excluded entirely, so they never get fed back in
+    as "context" and never count as a human having replied.
+    """
     parts = conversation.get("conversation_parts", {}).get("conversation_parts", [])
     source = conversation.get("source", {}) or {}
+    bot_admin_id = str(bot_admin_id) if bot_admin_id is not None else None
 
     lines = []
     admin_names = []
     current_admin_name = None
     seen_authors = set()
+    customer_message_count = 0
 
     initial_body = strip_html(source.get("body", ""))
     initial_body = trim_quoted_reply(initial_body)
     author = source.get("author", {}) or {}
     if initial_body:
         lines.append(f"[Customer - {author.get('name', 'unknown')}]: {initial_body}")
+        if author.get("type") in ("user", "lead"):
+            customer_message_count += 1
 
     for part in parts:
         part_type = part.get("part_type")
         part_author = part.get("author", {}) or {}
         author_type = part_author.get("type")
         author_name = part_author.get("name", "")
+        author_id = str(part_author.get("id")) if part_author.get("id") is not None else None
+
+        if bot_admin_id is not None and author_id == bot_admin_id:
+            # This is one of our own automated notes, skip entirely.
+            continue
 
         if part_type in ("comment", "note") and part.get("body"):
             text = strip_html(part["body"])
@@ -348,6 +371,7 @@ def build_conversation_view(conversation):
                 current_admin_name = author_name or current_admin_name
             elif author_type == "user" or author_type == "lead":
                 label = f"[Customer - {author_name}]"
+                customer_message_count += 1
             elif author_type == "bot":
                 label = "[Bot]"
             else:
@@ -376,6 +400,7 @@ def build_conversation_view(conversation):
         "current_admin_name": current_admin_name,
         "admin_names": admin_names,
         "updated_at": conversation.get("updated_at"),
+        "customer_message_count": customer_message_count,
     }
     return transcript_text, meta
 
@@ -417,7 +442,11 @@ def parse_claude_summary(raw_text):
     if not owner and not handover and not questions and not status:
         # Parsing failed, fall back to raw text so nothing is silently lost
         safe = html.escape(raw_text)
-        return f"<p><b>Shift handover summary</b></p><p>{safe}</p>"
+        return (
+            f"<p><b>Shift handover summary</b></p><p>{safe}</p>"
+            f"<p style=\"color:#999;font-size:10px;font-style:italic;margin:4px 0 0 0\">"
+            f"{html.escape(DISCLAIMER_TEXT)}</p>"
+        )
 
     status_color = "#2e7d32" if status.lower().startswith("solved") else "#b26a00"
     questions_html = "".join(f"<li>{html.escape(q)}</li>" for q in questions) or "<li>None captured</li>"
@@ -433,6 +462,8 @@ def parse_claude_summary(raw_text):
         f"<ul style=\"margin:2px 0;padding-left:18px\">{questions_html}</ul>"
         f"<p><b>Status:</b> <span style=\"color:{status_color}\"><b>{html.escape(status)}</b></span>"
         f"{' - ' + html.escape(reason) if reason else ''}</p>"
+        f"<p style=\"color:#999;font-size:10px;font-style:italic;margin:4px 0 0 0\">"
+        f"{html.escape(DISCLAIMER_TEXT)}</p>"
         f"<p style=\"color:#aaa;font-size:10px;margin-top:2px\">"
         f"{ist_now.strftime('%b %d %H:%M IST')}</p>"
     )
@@ -540,11 +571,29 @@ def main():
                 continue
 
             updated_at = conversation.get("updated_at")
-            if not args.force and str(state.get(conv_id, {}).get("last_updated_at")) == str(updated_at):
-                total_skipped_unchanged += 1
+            transcript_text, meta = build_conversation_view(conversation, bot_admin_id=admin_id)
+            customer_message_count = meta.get("customer_message_count", 0)
+
+            # A conversation can be assigned to a human admin while that
+            # admin has not actually said anything yet, everything so far
+            # is still just Loop AI. Skip until a real human message exists.
+            if not meta.get("admin_names"):
+                total_skipped_not_human += 1
                 continue
 
-            transcript_text, meta = build_conversation_view(conversation)
+            existing_state = state.get(conv_id)
+            if not args.force and existing_state is not None:
+                # A note already exists for this conversation. Only post a
+                # fresh one if at least MIN_NEW_CUSTOMER_MESSAGES new
+                # customer messages have arrived since that note, so a
+                # conversation stuck in an automated bounce/auto-reply loop
+                # (or just quiet with only agent activity) does not get a
+                # near-duplicate note every run.
+                previous_count = existing_state.get("customer_message_count", 0)
+                new_messages = customer_message_count - previous_count
+                if new_messages < MIN_NEW_CUSTOMER_MESSAGES_FOR_UPDATE:
+                    total_skipped_unchanged += 1
+                    continue
 
             try:
                 raw_summary = claude.summarize(transcript_text, meta)
@@ -578,7 +627,10 @@ def main():
                 total_errors += 1
                 continue
 
-            state[conv_id] = {"last_updated_at": updated_at}
+            state[conv_id] = {
+                "last_updated_at": updated_at,
+                "customer_message_count": customer_message_count,
+            }
             time.sleep(SLEEP_BETWEEN_CONVERSATIONS)
 
     if not args.dry_run:
@@ -587,7 +639,7 @@ def main():
     print("\n=== Summary ===")
     print(f"Conversations seen:            {total_seen}")
     print(f"Notes posted:                  {total_posted}")
-    print(f"Skipped (unchanged since last run): {total_skipped_unchanged}")
+    print(f"Skipped (fewer than {MIN_NEW_CUSTOMER_MESSAGES_FOR_UPDATE} new customer messages): {total_skipped_unchanged}")
     print(f"Skipped (not assigned to a human): {total_skipped_not_human}")
     print(f"Errors:                        {total_errors}")
     if args.dry_run:
