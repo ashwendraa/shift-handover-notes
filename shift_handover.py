@@ -529,6 +529,7 @@ def main():
 
     intercom = IntercomClient(intercom_token)
     claude = AnthropicClient(anthropic_key, model)
+    print(f"Using Anthropic model: {model}")
 
     state = load_state(state_file)
     admin_email_cache = {}
