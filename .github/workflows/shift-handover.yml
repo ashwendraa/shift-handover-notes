@@ -19,20 +19,24 @@ on:
 
   # Scheduled runs. GitHub Actions cron always runs in UTC. Target
   # shift-start times are IST (UTC+5:30): Mon-Fri 5 AM, 2 PM, 6 PM,
-  # 8 PM, and Sat 5 AM. Each run is set to fire 15 minutes BEFORE the
-  # actual shift time, so the incoming shift already has a fresh note
-  # waiting when they log in.
+  # 8 PM, and Sat 5 AM. Each run fires 23 minutes BEFORE the actual
+  # shift time, landing on minute :07 rather than a round quarter
+  # hour, since round minutes (:00/:15/:30/:45) are the most congested
+  # slots on GitHub's shared scheduler and see the longest delays.
   schedule:
-    # Mon-Fri 4:45 AM IST (15 min before 5 AM) -> Sun 11:15 PM through Thu 11:15 PM UTC
-    - cron: "15 23 * * 0-4"
-    # Mon-Fri 1:45 PM IST (15 min before 2 PM) -> Mon-Fri 8:15 AM UTC
-    - cron: "15 8 * * 1-5"
-    # Mon-Fri 5:45 PM IST (15 min before 6 PM) -> Mon-Fri 12:15 PM UTC
-    - cron: "15 12 * * 1-5"
-    # Mon-Fri 7:45 PM IST (15 min before 8 PM) -> Mon-Fri 2:15 PM UTC
-    - cron: "15 14 * * 1-5"
-    # Sat 4:45 AM IST (15 min before 5 AM) -> Fri 11:15 PM UTC
-    - cron: "15 23 * * 5"
+    # Mon-Fri 4:37 AM IST (23 min before 5 AM) -> Sun 11:07 PM through Thu 11:07 PM UTC
+    - cron: "7 23 * * 0-4"
+    # Mon-Fri 1:37 PM IST (23 min before 2 PM) -> Mon-Fri 8:07 AM UTC
+    - cron: "7 8 * * 1-5"
+    # Mon-Fri 5:37 PM IST (23 min before 6 PM) -> Mon-Fri 12:07 PM UTC
+    - cron: "7 12 * * 1-5"
+    # Mon-Fri 7:37 PM IST (23 min before 8 PM) -> Mon-Fri 2:07 PM UTC
+    - cron: "7 14 * * 1-5"
+    # Sat 4:37 AM IST (23 min before 5 AM) -> Fri 11:07 PM UTC
+    - cron: "7 23 * * 5"
+
+permissions:
+  contents: write
 
 jobs:
   run-handover:
@@ -45,15 +49,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
-      - name: Restore state file cache
-        uses: actions/cache@v4
-        with:
-          path: shift_handover_state.json
-          # A key that never changes on its own means the cache is
-          # restored every run and saved again every run, giving you
-          # a persistent state file across scheduled runs.
-          key: shift-handover-state
 
       - name: Run shift handover script (scheduled, live)
         if: github.event_name == 'schedule'
@@ -81,6 +76,28 @@ jobs:
             ARGS="$ARGS --limit-ids ${{ inputs.limit_ids }}"
           fi
           python3 shift_handover.py $ARGS
+
+      # actions/cache is built for immutable build caches, it will not
+      # save an updated version back to a key that already exists. That
+      # meant shift_handover_state.json was never actually persisting
+      # between runs, every run silently restored the ORIGINAL state
+      # from whenever the cache key was first created, causing repeat
+      # notes indefinitely. Committing the state file directly to the
+      # repo instead guarantees each run sees exactly what the previous
+      # run actually wrote.
+      - name: Commit updated state file
+        if: always()
+        run: |
+          git config user.name "shift-handover-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add shift_handover_state.json
+          if git diff --cached --quiet; then
+            echo "No state changes to commit."
+          else
+            git commit -m "Update shift handover state"
+            git pull --rebase origin main
+            git push origin HEAD:main
+          fi
 
       - name: Upload run log as artifact
         if: always()
