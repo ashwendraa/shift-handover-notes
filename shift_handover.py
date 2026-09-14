@@ -75,7 +75,7 @@ EXCLUDED_ADMIN_EMAILS = {"product@loopwork.co"}
 # least this many NEW customer messages have arrived since the last
 # note. This is what stops automated bounce/auto-reply loops and
 # quiet agent-only activity from generating near-duplicate notes.
-MIN_NEW_CUSTOMER_MESSAGES_FOR_UPDATE = 2
+MIN_NEW_CUSTOMER_MESSAGES_FOR_UPDATE = 3
 
 DISCLAIMER_TEXT = "Note: This summary is for reference only, cross check all details if needed to avoid escalation."
 IST_OFFSET = timedelta(hours=5, minutes=30)
