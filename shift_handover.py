@@ -38,7 +38,10 @@ Required environment variables:
     ANTHROPIC_API_KEY       Your Anthropic API key
 
 Optional environment variables:
-    ANTHROPIC_MODEL          Default: claude-haiku-4-5-20251001
+    ANTHROPIC_MODEL          Default: claude-haiku-5-5
+                              (set this to override the model without
+                              touching the code, for example
+                              claude-sonnet-5-5 for higher quality)
     STATE_FILE               Default: shift_handover_state.json
                               (tracks which conversations were already
                               summarized at what updated_at, so re-runs
@@ -62,7 +65,7 @@ INTERCOM_API_BASE = "https://api.intercom.io"
 ANTHROPIC_API_BASE = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_VERSION = "2023-06-01"
 
-DEFAULT_MODEL = "claude-haiku-4-5-20251001"
+DEFAULT_MODEL = "claude-haiku-5-5"
 STATE_FILE_DEFAULT = "shift_handover_state.json"
 LOG_FILE_DEFAULT = "shift_handover_log.csv"
 
