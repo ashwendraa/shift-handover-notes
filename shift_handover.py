@@ -38,10 +38,10 @@ Required environment variables:
     ANTHROPIC_API_KEY       Your Anthropic API key
 
 Optional environment variables:
-    ANTHROPIC_MODEL          Default: claude-haiku-5-5
+    ANTHROPIC_MODEL          Default: claude-haiku-4-5-20251001
                               (set this to override the model without
                               touching the code, for example
-                              claude-sonnet-5-5 for higher quality)
+                              claude-sonnet-4-5 for higher quality)
     STATE_FILE               Default: shift_handover_state.json
                               (tracks which conversations were already
                               summarized at what updated_at, so re-runs
@@ -65,7 +65,7 @@ INTERCOM_API_BASE = "https://api.intercom.io"
 ANTHROPIC_API_BASE = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_VERSION = "2023-06-01"
 
-DEFAULT_MODEL = "claude-haiku-5-5"
+DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 STATE_FILE_DEFAULT = "shift_handover_state.json"
 LOG_FILE_DEFAULT = "shift_handover_log.csv"
 
@@ -459,9 +459,6 @@ def parse_claude_summary(raw_text):
 
     ist_now = datetime.now(timezone.utc) + IST_OFFSET
 
-    # Deliberately compact: owner on its own line so it is never ambiguous
-    # who the next shift follows up with, one line handover, tight question
-    # list, one line status, IST timestamp footer.
     body = (
         f"<p><b>Owner:</b> {html.escape(owner) if owner else 'Unassigned'}</p>"
         f"<p><b>Handover:</b> {html.escape(handover)}</p>"
@@ -565,9 +562,6 @@ def main():
                 total_errors += 1
                 continue
 
-            # Skip conversations never escalated to a human (still purely
-            # with the bot, no admin assigned), and skip conversations
-            # currently owned by a non-human/system inbox account.
             current_admin_id = conversation.get("admin_assignee_id")
             if current_admin_id is None:
                 total_skipped_not_human += 1
@@ -581,21 +575,12 @@ def main():
             transcript_text, meta = build_conversation_view(conversation, bot_admin_id=admin_id)
             customer_message_count = meta.get("customer_message_count", 0)
 
-            # A conversation can be assigned to a human admin while that
-            # admin has not actually said anything yet, everything so far
-            # is still just Loop AI. Skip until a real human message exists.
             if not meta.get("admin_names"):
                 total_skipped_not_human += 1
                 continue
 
             existing_state = state.get(conv_id)
             if not args.force and existing_state is not None:
-                # A note already exists for this conversation. Only post a
-                # fresh one if at least MIN_NEW_CUSTOMER_MESSAGES new
-                # customer messages have arrived since that note, so a
-                # conversation stuck in an automated bounce/auto-reply loop
-                # (or just quiet with only agent activity) does not get a
-                # near-duplicate note every run.
                 previous_count = existing_state.get("customer_message_count", 0)
                 new_messages = customer_message_count - previous_count
                 if new_messages < MIN_NEW_CUSTOMER_MESSAGES_FOR_UPDATE:
@@ -613,10 +598,6 @@ def main():
             note_html = parse_claude_summary(raw_summary)
 
             if args.dry_run:
-                # Dry runs must never mark a conversation as handled. Only an
-                # actual successful post advances the state file, otherwise a
-                # dry run would cause the next live run to skip conversations
-                # it never actually posted to.
                 print(f"\n--- [{conv_id}] DRY RUN, would post: ---")
                 print(note_html)
                 log_result(log_file, [datetime.now(timezone.utc).isoformat(), conv_id, state_name, "dry_run", "would_post", raw_summary[:300]])
